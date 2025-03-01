@@ -33,11 +33,19 @@ const AUTO_LEVEL_SPEED: f32 = 0.9;
 const BANK_TURN_RATIO: f32 = 0.5;
 
 // Water physics constants
-const WATER_DAMPING: f32 = 0.95;
-const WATER_ROTATION_DAMPING: f32 = 0.9;
-const WATER_LEVEL_SPEED: f32 = 0.1;
+const WATER_DAMPING: f32 = 0.8; // Stronger damping for more realistic water resistance
+const WATER_ROTATION_DAMPING: f32 = 0.6; // Stronger rotation damping in water
+const WATER_LEVEL_SPEED: f32 = 0.3; // Much faster auto-leveling on water
 const TAKEOFF_SPEED_THRESHOLD: f32 = 0.7; // Percentage of MAX_SPEED needed for takeoff
 const TAKEOFF_FORCE: f32 = 2.0;
+const WATER_IMPACT_THRESHOLD: f32 = 4.0; // Lower threshold for bounce effect
+const WATER_BOUNCE_FACTOR: f32 = 0.4; // Stronger bounce on impact
+const WATER_IMPACT_SLOWDOWN: f32 = 0.6; // Stronger slowdown on impact
+const WATER_STOP_SPEED: f32 = 0.95; // How quickly the plane slows to a stop on water
+const WATER_STOP_THRESHOLD: f32 = 5.0; // Speed below which the plane will come to a complete stop
+const WATER_STABILIZE_FACTOR: f32 = 0.9; // Reduces twitching by stabilizing movement
+const WATER_SAILING_SPEED: f32 = 5.0; // Speed for sailing on water
+const WATER_LEVEL_ROTATION_SPEED: f32 = 0.5; // How quickly the plane levels to horizontal
 
 fn main() {
     // Configure physics with interpolation for smooth movement
@@ -59,6 +67,8 @@ fn main() {
             momentum: Vec3::new(0.0, 0.0, -MIN_SPEED),
             turn_momentum: Vec3::ZERO,
             bank_angle: 0.0,
+            was_on_water: false,
+            impact_bounce: 0.0,
         })
         .add_systems(Startup, setup)
         .add_systems(Update, (
@@ -76,6 +86,8 @@ struct PlaneState {
     momentum: Vec3,
     turn_momentum: Vec3,
     bank_angle: f32,
+    was_on_water: bool, // Track if the plane was on water in the previous frame
+    impact_bounce: f32, // Track bounce effect after water impact
 }
 
 #[derive(Component)]
@@ -440,24 +452,101 @@ fn plane_controller(
 fn plane_physics(
     mut plane_state: ResMut<PlaneState>,
     time: Res<Time>,
-    mut plane_query: Query<(&Transform, &CollidingEntities, &mut LinearVelocity, &mut AngularVelocity), With<Plane>>,
+    mut plane_query: Query<(&mut Transform, &CollidingEntities, &mut LinearVelocity, &mut AngularVelocity), With<Plane>>,
     water_query: Query<Entity, With<Water>>,
 ) {
-    let (plane_transform, colliding_entities, mut linear_vel, mut angular_vel) = plane_query.single_mut();
+    let (mut plane_transform, colliding_entities, mut linear_vel, mut angular_vel) = plane_query.single_mut();
     let dt = time.delta_secs();
     let water_entity = water_query.single();
 
     // Check if plane is touching water
     let is_on_water = colliding_entities.contains(&water_entity);
-
+    
+    // Detect water impact (transition from air to water)
+    let water_impact = is_on_water && !plane_state.was_on_water;
+    
     if is_on_water {
+        // Ensure plane doesn't go below water line
+        if plane_transform.translation.y < 0.1 {
+            plane_transform.translation.y = 0.1;
+            
+            // Zero out any downward velocity to prevent sinking
+            if linear_vel.0.y < 0.0 {
+                linear_vel.0.y = 0.0;
+            }
+        }
+        
+        // Handle initial water impact
+        if water_impact {
+            // Check vertical velocity for impact effect
+            let impact_velocity = linear_vel.0.y.abs();
+            
+            if impact_velocity > WATER_IMPACT_THRESHOLD {
+                // Calculate bounce based on impact velocity
+                let bounce_force = impact_velocity * WATER_BOUNCE_FACTOR;
+                plane_state.impact_bounce = bounce_force;
+                
+                // Apply additional slowdown on hard impact
+                plane_state.speed *= WATER_IMPACT_SLOWDOWN;
+                linear_vel.0 *= WATER_IMPACT_SLOWDOWN;
+            }
+        }
+        
+        // Apply bounce effect if active
+        if plane_state.impact_bounce > 0.0 {
+            linear_vel.0.y += plane_state.impact_bounce;
+            plane_state.impact_bounce *= 0.8; // Decay bounce effect
+            
+            // Clear bounce when it gets small enough
+            if plane_state.impact_bounce < 0.1 {
+                plane_state.impact_bounce = 0.0;
+            }
+        }
+        
+        // Get current rotation as Euler angles
+        let (pitch, yaw, roll) = plane_transform.rotation.to_euler(EulerRot::XYZ);
+        
+        // Force the plane to level up (rotate toward horizontal position)
+        if pitch.abs() > 0.01 || roll.abs() > 0.01 {
+            // Create a target rotation that's level (horizontal)
+            let target_rotation = Quat::from_rotation_y(yaw); // Keep only the yaw rotation
+            
+            // Smoothly interpolate toward the level rotation
+            plane_transform.rotation = plane_transform.rotation.slerp(
+                target_rotation, 
+                WATER_LEVEL_ROTATION_SPEED * dt
+            );
+            
+            // Zero out any rotational velocity to prevent twitching
+            angular_vel.0 = Vec3::ZERO;
+        }
+        
         // Apply stronger water resistance
         linear_vel.0 *= WATER_DAMPING;
-        angular_vel.0 *= WATER_DAMPING;
-
-        // Gradually level the plane when on water
-        angular_vel.0.x *= WATER_ROTATION_DAMPING; // Pitch damping
-        angular_vel.0.z *= WATER_ROTATION_DAMPING; // Roll damping
+        
+        // Reduce twitching by stabilizing movement
+        linear_vel.0.x *= WATER_STABILIZE_FACTOR;
+        linear_vel.0.z *= WATER_STABILIZE_FACTOR;
+        
+        // Gradually slow down to a stop when on water
+        if !water_impact { // Don't apply this on the first frame of water contact
+            plane_state.speed *= WATER_STOP_SPEED;
+            
+            // If speed is below threshold, come to a complete stop
+            if plane_state.speed < WATER_STOP_THRESHOLD {
+                plane_state.speed = plane_state.speed * 0.95;
+                
+                // When very slow, switch to sailing mode
+                if plane_state.speed < 1.0 {
+                    // Allow the plane to sail at a very low speed
+                    plane_state.speed = WATER_SAILING_SPEED;
+                    
+                    // Keep a small forward momentum for sailing
+                    let forward = plane_transform.forward();
+                    linear_vel.0 = forward * WATER_SAILING_SPEED;
+                }
+            }
+        }
 
         // Allow taking off with enough speed
         if plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD {
@@ -465,6 +554,9 @@ fn plane_physics(
             linear_vel.0 += up_force * dt;
         }
     }
+
+    // Update was_on_water state for next frame
+    plane_state.was_on_water = is_on_water;
 
     // Get the plane's forward direction
     let forward = plane_transform.forward();
