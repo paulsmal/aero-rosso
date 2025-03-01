@@ -35,7 +35,7 @@ const BANK_TURN_RATIO: f32 = 0.5;
 // Water physics constants
 const WATER_DAMPING: f32 = 0.8; // Stronger damping for more realistic water resistance
 const WATER_ROTATION_DAMPING: f32 = 0.6; // Stronger rotation damping in water
-const WATER_LEVEL_SPEED: f32 = 0.3; // Much faster auto-leveling on water
+const WATER_LEVEL_SPEED: f32 = 15.3; // Much faster auto-leveling on water
 const TAKEOFF_SPEED_THRESHOLD: f32 = 0.7; // Percentage of MAX_SPEED needed for takeoff
 const TAKEOFF_FORCE: f32 = 2.0;
 const WATER_IMPACT_THRESHOLD: f32 = 4.0; // Lower threshold for bounce effect
@@ -45,7 +45,7 @@ const WATER_STOP_SPEED: f32 = 0.95; // How quickly the plane slows to a stop on 
 const WATER_STOP_THRESHOLD: f32 = 5.0; // Speed below which the plane will come to a complete stop
 const WATER_STABILIZE_FACTOR: f32 = 0.9; // Reduces twitching by stabilizing movement
 const WATER_SAILING_SPEED: f32 = 5.0; // Speed for sailing on water
-const WATER_LEVEL_ROTATION_SPEED: f32 = 0.5; // How quickly the plane levels to horizontal
+const WATER_LEVEL_ROTATION_SPEED: f32 = 10.5; // How quickly the plane levels to horizontal
 
 fn main() {
     // Configure physics with interpolation for smooth movement
@@ -76,6 +76,7 @@ fn main() {
             plane_physics,
             camera_follow,
             cloud_movement,
+            update_ui_display,
         ))
         .run();
 }
@@ -112,6 +113,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
 ) {
     // Create water with physics collider
     let water_material = materials.add(StandardMaterial {
@@ -322,7 +324,7 @@ fn setup(
             .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Add camera
+    // Add 3D camera
     let camera_entity = commands.spawn((
         Camera3d::default(),
         Camera {
@@ -346,6 +348,88 @@ fn setup(
     )).id();
     
     atmospheric::add_motion_blur(&mut commands, camera_entity);
+    
+    // Add 2D camera for UI overlay with a different priority to avoid ambiguity
+    commands.spawn((
+        Camera2d::default(),
+        Camera {
+            order: 0, // Higher priority than the default 0 of the 3D camera
+            ..default()
+        },
+    ));
+    
+    // Setup UI for flight data display
+    setup_ui(&mut commands, &asset_server);
+}
+
+// UI Components
+#[derive(Component)]
+struct FlightDataText;
+
+#[derive(Component)]
+struct ControlsText;
+
+fn setup_ui(commands: &mut Commands, _asset_server: &Res<AssetServer>) {
+    // Flight data text (bottom left)
+    commands.spawn((
+        Text::new("FLIGHT DATA\nSpeed: 0 km/h (0%)\nAltitude: 0.0 m\nStatus: ON WATER"),
+        Transform::from_xyz(-430.0, 280.0, 0.0),  // Move to top left
+        FlightDataText,
+    ));
+    
+    // Controls text (bottom right)
+    commands.spawn((
+        Text::new("CONTROLS\nPitch: 0.0°\nRoll: 0.0°\nYaw: 0.0°\nThrottle: 0%\nTakeoff Ready: NO"),
+        Transform::from_xyz(430.0, 280.0, 0.0),  // Move to top right
+        ControlsText,
+    ));
+}
+
+fn update_ui_display(
+    plane_state: Res<PlaneState>,
+    plane_query: Query<&Transform, With<Plane>>,
+    water_query: Query<Entity, With<Water>>,
+    colliding_entities_query: Query<&CollidingEntities, With<Plane>>,
+    mut flight_data_text: Query<&mut Text, (With<FlightDataText>, Without<ControlsText>)>,
+    mut controls_text: Query<&mut Text, (With<ControlsText>, Without<FlightDataText>)>,
+) {
+    let plane_transform = plane_query.single();
+    let colliding_entities = colliding_entities_query.single();
+    let water_entity = water_query.single();
+    let is_on_water = colliding_entities.contains(&water_entity);
+    
+    // Get rotation as Euler angles
+    let (pitch, yaw, roll) = plane_transform.rotation.to_euler(EulerRot::XYZ);
+    
+    // Check takeoff conditions
+    let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+    let has_positive_pitch = pitch < -0.1;
+    let takeoff_ready = has_takeoff_speed && has_positive_pitch;
+    
+    // Update flight data text
+    if let Ok(mut text) = flight_data_text.get_single_mut() {
+        let status_str = if is_on_water { "ON WATER" } else { "AIRBORNE" };
+        
+        *text = Text::new(format!(
+            "FLIGHT DATA\nSpeed: {:.1} km/h ({:.0}%)\nAltitude: {:.1} m\nStatus: {}",
+            plane_state.speed,
+            (plane_state.speed / MAX_SPEED) * 100.0,
+            plane_transform.translation.y,
+            status_str
+        ));
+    }
+    
+    // Update controls text
+    if let Ok(mut text) = controls_text.get_single_mut() {
+        *text = Text::new(format!(
+            "CONTROLS\nPitch: {:.1}°\nRoll: {:.1}°\nYaw: {:.1}°\nThrottle: {:.0}%\nTakeoff Ready: {}",
+            pitch.to_degrees(),
+            roll.to_degrees(),
+            yaw.to_degrees(),
+            (plane_state.speed / MAX_SPEED) * 100.0,
+            if takeoff_ready { "YES" } else { "NO" }
+        ));
+    }
 }
 
 fn plane_controller(
@@ -548,15 +632,46 @@ fn plane_physics(
             }
         }
 
-        // Allow taking off with enough speed
-        if plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD {
-            let up_force = Vec3::Y * plane_state.speed * TAKEOFF_FORCE;
+        // Improved takeoff mechanism
+        // Check if plane has enough speed and positive pitch (elevator up)
+        let (pitch, _, _) = plane_transform.rotation.to_euler(EulerRot::XYZ);
+        let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+        let has_positive_pitch = pitch < -0.1; // Negative pitch means nose up in this coordinate system
+        
+        if has_takeoff_speed && has_positive_pitch {
+            // Calculate takeoff force based on speed and pitch
+            let pitch_factor = (-pitch).max(0.0).min(1.0); // Convert to positive factor
+            let speed_factor = (plane_state.speed / MAX_SPEED).min(1.0);
+            
+            // Combine factors for final takeoff force
+            let takeoff_strength = pitch_factor * speed_factor * TAKEOFF_FORCE;
+            let up_force = Vec3::Y * takeoff_strength * 2.0;
+            
+            // Apply upward force
             linear_vel.0 += up_force * dt;
+            
+            // If we're applying enough force, allow rotation again
+            if takeoff_strength > 0.5 {
+                // Gradually restore control as we lift off
+                angular_vel.0 = Vec3::new(
+                    plane_state.turn_momentum.x,
+                    plane_state.turn_momentum.y,
+                    plane_state.bank_angle
+                ) * 5.0 * takeoff_strength;
+            }
         }
     }
 
     // Update was_on_water state for next frame
     plane_state.was_on_water = is_on_water;
+    
+    // Get current rotation as Euler angles for debug info
+    let (pitch, _, _) = plane_transform.rotation.to_euler(EulerRot::XYZ);
+    
+    // Print debug info periodically (approximately once per second)
+    if (time.elapsed_secs() * 1.0).floor() != (time.elapsed_secs() * 1.0 - dt).floor() {
+        print_debug_info(&plane_state, &plane_transform, is_on_water, pitch);
+    }
 
     // Get the plane's forward direction
     let forward = plane_transform.forward();
@@ -639,4 +754,27 @@ fn cloud_movement(
             transform.translation.z = -WATER_SIZE / 2.0;
         }
     }
+}
+
+// Print debug info to console
+fn print_debug_info(
+    plane_state: &PlaneState,
+    transform: &Transform,
+    is_on_water: bool,
+    pitch: f32,
+) {
+    // Check takeoff conditions
+    let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+    let has_positive_pitch = pitch < -0.1;
+    let takeoff_ready = has_takeoff_speed && has_positive_pitch;
+    
+    println!(
+        "Speed: {:.1} ({:.0}%), Altitude: {:.1}, Pitch: {:.1}°, Status: {}, Takeoff Ready: {}",
+        plane_state.speed,
+        (plane_state.speed / MAX_SPEED) * 100.0,
+        transform.translation.y,
+        pitch.to_degrees(),
+        if is_on_water { "ON WATER" } else { "AIRBORNE" },
+        if takeoff_ready { "YES" } else { "NO" }
+    );
 }
