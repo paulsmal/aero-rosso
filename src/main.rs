@@ -24,7 +24,7 @@ const PLANE_SCALE: f32 = 2.0;
 // Flight physics constants
 const TURN_SPEED: f32 = 0.5;
 const PITCH_SENSITIVITY: f32 = 0.8;
-const BASE_ROLL_SENSITIVITY: f32 = 0.15; // Extremely low base roll sensitivity
+const BASE_ROLL_SENSITIVITY: f32 = 0.02;
 const YAW_SENSITIVITY: f32 = 0.3;
 const MOMENTUM: f32 = 0.98; // Even more momentum for smoother movement
 const TURN_MOMENTUM: f32 = 0.99; // Maximum turn smoothing
@@ -345,7 +345,7 @@ fn plane_controller(
     }
 
     // Get control inputs
-    let roll = if keyboard_input.pressed(KeyCode::KeyA) {
+    let roll: f32 = if keyboard_input.pressed(KeyCode::KeyA) {
         -1.0
     } else if keyboard_input.pressed(KeyCode::KeyD) {
         1.0
@@ -369,17 +369,43 @@ fn plane_controller(
         0.0
     };
 
-    // Calculate roll sensitivity based on speed
+    // Calculate base roll sensitivity based on speed
     let speed_factor = (plane_state.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
-    let roll_sensitivity = BASE_ROLL_SENSITIVITY * (0.5 + speed_factor * 0.5);
+    let base_sensitivity = BASE_ROLL_SENSITIVITY * (0.5 + speed_factor * 0.5);
     
-    // Update bank angle based on roll input with speed-based sensitivity
+    // Calculate roll resistance based on current bank angle
+    // Maximum possible resistance
+    let bank_resistance = (plane_state.bank_angle.abs() * 16.0).exp();
+    let roll_direction = roll.signum();
+    let current_roll_direction = plane_state.bank_angle.signum();
+    
+    // Almost impossible to roll further in current direction
+    let roll_sensitivity = if roll_direction == current_roll_direction {
+        base_sensitivity / (bank_resistance * bank_resistance * bank_resistance * bank_resistance) // Fourth power resistance
+    } else {
+        // Very easy to roll back to level
+        base_sensitivity * 16.0
+    };
+
+    // Debug print to verify resistance is working
+    println!(
+        "Roll: {}, Bank: {:.2}, Resistance: {:.2}, Sensitivity: {:.6}",
+        roll,
+        plane_state.bank_angle,
+        bank_resistance,
+        roll_sensitivity
+    );
+    
+    // Update bank angle with resistance-adjusted sensitivity
     plane_state.bank_angle += roll * roll_sensitivity * dt;
     
-    // Gentler auto-level when no roll input
+    // Extremely tight clamp on maximum bank angle (20 degrees)
+    plane_state.bank_angle = plane_state.bank_angle.clamp(-PI / 9.0, PI / 9.0);
+    
+    // Strong auto-level when no roll input
     if roll == 0.0 {
-        let level_factor = plane_state.bank_angle.abs() / PI;
-        let level_speed = AUTO_LEVEL_SPEED * (0.5 + level_factor * 0.5);
+        let level_factor = plane_state.bank_angle.abs() / (PI / 3.0);
+        let level_speed = AUTO_LEVEL_SPEED * (0.8 + level_factor * 0.8);
         plane_state.bank_angle *= 1.0 - level_speed * dt;
     }
 
