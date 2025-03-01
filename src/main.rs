@@ -5,41 +5,54 @@ use bevy::{
     render::{
         camera::Projection,
     },
-    pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
+    pbr::DirectionalLightShadowMap,
     core_pipeline::{experimental::taa::TemporalAntiAliasPlugin, bloom::Bloom},
 };
+use avian3d::prelude::*;
 use atmospheric::AtmosphericFogPlugin;
 use rand::{thread_rng, Rng};
 use std::f32::consts::PI;
 
 // Game settings
 const MIN_SPEED: f32 = 25.0;
-const MAX_SPEED: f32 = 50.0;
+const MAX_SPEED: f32 = 80.0;
 const ACCELERATION: f32 = 10.0;
-const WATER_SIZE: f32 = 500.0;
-const ISLAND_COUNT: usize = 8;
-const CLOUD_COUNT: usize = 30;
+const WATER_SIZE: f32 = 1500.0;
+const ISLAND_COUNT: usize = 18;
+const CLOUD_COUNT: usize = 160;
 const PLANE_SCALE: f32 = 2.0;
 
 // Flight physics constants
 const TURN_SPEED: f32 = 0.5;
 const PITCH_SENSITIVITY: f32 = 0.8;
-const BASE_ROLL_SENSITIVITY: f32 = 0.02;
+const BASE_ROLL_SENSITIVITY: f32 = 0.2;
 const YAW_SENSITIVITY: f32 = 0.3;
-const MOMENTUM: f32 = 0.98; // Even more momentum for smoother movement
-const TURN_MOMENTUM: f32 = 0.99; // Maximum turn smoothing
-const AUTO_LEVEL_SPEED: f32 = 0.4; // Very slow auto-leveling
-const BANK_TURN_RATIO: f32 = 0.5; // Much reduced banking effect
+const MOMENTUM: f32 = 0.98;
+const TURN_MOMENTUM: f32 = 0.99;
+const AUTO_LEVEL_SPEED: f32 = 0.9;
+const BANK_TURN_RATIO: f32 = 0.5;
+
+// Water physics constants
+const WATER_DAMPING: f32 = 0.95;
+const WATER_ROTATION_DAMPING: f32 = 0.9;
+const WATER_LEVEL_SPEED: f32 = 0.1;
+const TAKEOFF_SPEED_THRESHOLD: f32 = 0.7; // Percentage of MAX_SPEED needed for takeoff
+const TAKEOFF_FORCE: f32 = 2.0;
 
 fn main() {
+    // Configure physics with interpolation for smooth movement
+    let physics_plugins = PhysicsPlugins::default()
+        .set(PhysicsInterpolationPlugin::interpolate_all());
+
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(TemporalAntiAliasPlugin)
         .add_plugins(AtmosphericFogPlugin)
+        .add_plugins(physics_plugins)
         .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .insert_resource(AmbientLight {
             color: Color::srgb(0.7, 0.8, 1.0),
-            brightness: 0.5, // Increased brightness
+            brightness: 0.5,
         })
         .insert_resource(PlaneState {
             speed: MIN_SPEED,
@@ -57,7 +70,6 @@ fn main() {
         .run();
 }
 
-// Resource to track plane state
 #[derive(Resource)]
 struct PlaneState {
     speed: f32,
@@ -66,25 +78,20 @@ struct PlaneState {
     bank_angle: f32,
 }
 
-// Component to mark the plane
 #[derive(Component)]
 struct Plane;
 
-// Component to mark the camera
 #[derive(Component)]
 struct FollowCamera;
 
-// Component to mark islands
 #[derive(Component)]
 struct Island;
 
-// Component to mark clouds with movement speed
 #[derive(Component)]
 struct Cloud {
     speed: f32,
 }
 
-// Component to mark water
 #[derive(Component)]
 struct Water;
 
@@ -94,7 +101,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // Create water
+    // Create water with physics collider
     let water_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.0, 0.5, 0.8, 0.9),
         perceptual_roughness: 0.1,
@@ -103,13 +110,16 @@ fn setup(
         ..default()
     });
 
-    commands.spawn((
+    let water_entity = commands.spawn((
         Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::new(WATER_SIZE, WATER_SIZE)).mesh().size(WATER_SIZE, WATER_SIZE))),
         MeshMaterial3d(water_material),
         Transform::from_xyz(0.0, 0.0, 0.0),
-        GlobalTransform::default(),
         Water,
-    ));
+        RigidBody::Static,
+        Collider::cuboid(WATER_SIZE/2.0, 0.1, WATER_SIZE/2.0),
+        Sensor::default(), // Make it a sensor to detect collisions without physical response
+        Friction::new(0.8), // High friction to slow down plane on water
+    )).id();
 
     // Create islands
     let island_mesh = meshes.add(Mesh::from(Cylinder {
@@ -134,8 +144,9 @@ fn setup(
             MeshMaterial3d(island_material.clone()),
             Transform::from_xyz(x, 0.0, z)
                 .with_scale(Vec3::new(scale, scale * 0.5, scale)),
-            GlobalTransform::default(),
             Island,
+            RigidBody::Static,
+            Collider::cylinder(2.5, 10.0),
         ));
     }
 
@@ -162,7 +173,6 @@ fn setup(
             MeshMaterial3d(cloud_material.clone()),
             Transform::from_xyz(x, y, z)
                 .with_scale(Vec3::new(scale_x, scale_y, scale_z)),
-            GlobalTransform::default(),
             Cloud {
                 speed: cloud_speed,
             },
@@ -178,39 +188,56 @@ fn setup(
         base_color: Color::srgb(0.9, 0.1, 0.1),
         perceptual_roughness: 0.2,
         metallic: 0.8,
-        emissive: Color::srgb(0.8, 0.2, 0.2).into(), // Increased glow to make it more visible
+        emissive: Color::srgb(0.8, 0.2, 0.2).into(),
         ..default()
     });
     
-    // Material for wing tips and tail
     let white_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.9, 0.9, 0.9),
         perceptual_roughness: 0.2,
         metallic: 0.8,
-        emissive: Color::srgb(0.5, 0.5, 0.5).into(), // Add glow
+        emissive: Color::srgb(0.5, 0.5, 0.5).into(),
         ..default()
     });
 
-    // Plane entity with child parts
-    let plane = commands.spawn((
+    // Create a parent entity for the plane
+    let plane_entity = commands.spawn_empty().id();
+    
+    // Add components to the plane entity
+    commands.entity(plane_entity).insert((
+        Mesh3d(meshes.add(Mesh::from(Cuboid::new(1.0, 0.25, 2.0)))),
+        MeshMaterial3d(red_material.clone()),
         Transform::from_xyz(0.0, 20.0, 0.0)
             .with_rotation(Quat::from_rotation_y(PI))
-            .with_scale(Vec3::splat(PLANE_SCALE)), // Scale up the plane
-        GlobalTransform::default(),
+            .with_scale(Vec3::splat(PLANE_SCALE)),
         Plane,
-        // Add a name for debugging
         Name::new("Plane"),
-        // Add visibility component to ensure it's visible
         Visibility::Visible,
         InheritedVisibility::default(),
-    ))
-    .with_children(|parent| {
+    ));
+    
+    // Add physics components
+    commands.entity(plane_entity).insert((
+        RigidBody::Dynamic,
+        Collider::cuboid(1.0 * PLANE_SCALE, 0.25 * PLANE_SCALE, 2.0 * PLANE_SCALE),
+        LinearDamping(0.1), // Air resistance
+        AngularDamping(0.2), // Rotational damping
+        CollidingEntities::default(), // Track collisions
+        LinearVelocity::default(),
+        AngularVelocity::default(),
+        GravityScale(1.0),
+        Restitution::new(0.3), // Bounciness
+        Friction::new(0.5), // Surface friction
+        TransformInterpolation::default(), // Smooth physics movement
+    ));
+    
+    // Add child parts to the plane
+    commands.entity(plane_entity).with_children(|parent| {
         // Plane body
         parent.spawn((
             Mesh3d(plane_body),
             MeshMaterial3d(red_material.clone()),
             Transform::default(),
-            GlobalTransform::default(),
             Visibility::Visible,
             InheritedVisibility::default(),
         ));
@@ -220,24 +247,21 @@ fn setup(
             Mesh3d(plane_wing.clone()),
             MeshMaterial3d(red_material.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
-            GlobalTransform::default(),
             Visibility::Visible,
             InheritedVisibility::default(),
         ));
         
-        // Wing tips (for better visibility)
+        // Wing tips
         parent.spawn((
             Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.5, 0.3, 0.5)))),
             MeshMaterial3d(white_material.clone()),
             Transform::from_xyz(4.0, 0.0, 0.0),
-            GlobalTransform::default(),
         ));
         
         parent.spawn((
             Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.5, 0.3, 0.5)))),
             MeshMaterial3d(white_material.clone()),
             Transform::from_xyz(-4.0, 0.0, 0.0),
-            GlobalTransform::default(),
         ));
         
         // Plane tail
@@ -245,7 +269,6 @@ fn setup(
             Mesh3d(plane_tail),
             MeshMaterial3d(red_material.clone()),
             Transform::from_xyz(0.0, 0.5, -2.0),
-            GlobalTransform::default(),
         ));
         
         // Tail tip
@@ -253,10 +276,9 @@ fn setup(
             Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.3, 0.3, 0.3)))),
             MeshMaterial3d(white_material.clone()),
             Transform::from_xyz(0.0, 1.0, -2.0),
-            GlobalTransform::default(),
         ));
         
-        // Propeller (simplified)
+        // Propeller
         parent.spawn((
             Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.2, 1.5, 0.1)))),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -264,24 +286,20 @@ fn setup(
                 ..default()
             })),
             Transform::from_xyz(0.0, 0.0, 2.1),
-            GlobalTransform::default(),
         ));
-    }).id();
+    });
 
-    // Add a directional light
+    // Add directional lights
     commands.spawn((
         DirectionalLight {
-            illuminance: 50000.0, // Further increased illuminance for better visibility
+            illuminance: 50000.0,
             shadows_enabled: true,
             ..default()
         },
         Transform::from_xyz(10.0, 50.0, 10.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
-        GlobalTransform::default(),
-        // Skip the cascade shadow config for now
     ));
     
-    // Add a second directional light from another angle
     commands.spawn((
         DirectionalLight {
             illuminance: 15000.0,
@@ -290,38 +308,31 @@ fn setup(
         },
         Transform::from_xyz(-10.0, 30.0, -10.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
-        GlobalTransform::default(),
     ));
 
-    // Add a camera that follows the plane
+    // Add camera
     let camera_entity = commands.spawn((
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.5, 0.8, 1.0)),
             ..default()
         },
-        Transform::from_xyz(0.0, 30.0, 50.0)
-            .looking_at(Vec3::new(0.0, 20.0, 0.0), Vec3::Y),
-        GlobalTransform::default(),
         Projection::Perspective(PerspectiveProjection {
             fov: std::f32::consts::PI / 3.0,
-            near: 0.1, // Set a smaller near plane to see objects closer to the camera
-            far: 2000.0, // Set a larger far plane to see objects farther away
+            near: 0.1,
+            far: 2000.0,
             ..default()
         }),
+        Transform::from_xyz(0.0, 30.0, 50.0)
+            .looking_at(Vec3::new(0.0, 20.0, 0.0), Vec3::Y),
         Bloom {
             intensity: 0.3,
             ..default()
         },
         FollowCamera {},
-        // Add a name for debugging
         Name::new("Camera"),
-        // Add visibility component to ensure it's visible
-        Visibility::Visible,
-        InheritedVisibility::default(),
     )).id();
     
-    // Add motion blur to the camera
     atmospheric::add_motion_blur(&mut commands, camera_entity);
 }
 
@@ -329,10 +340,13 @@ fn plane_controller(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut plane_state: ResMut<PlaneState>,
     time: Res<Time>,
-    mut query: Query<&mut Transform, With<Plane>>,
+    mut query: Query<(&Transform, &mut AngularVelocity, &CollidingEntities), With<Plane>>,
+    water_query: Query<Entity, With<Water>>,
 ) {
-    let mut plane_transform = query.single_mut();
+    let (plane_transform, mut angular_vel, colliding_entities) = query.single_mut();
     let dt = time.delta_secs();
+    let water_entity = water_query.single();
+    let is_on_water = colliding_entities.contains(&water_entity);
 
     // Speed control (Up/Down arrows)
     if keyboard_input.pressed(KeyCode::ArrowUp) {
@@ -369,50 +383,41 @@ fn plane_controller(
         0.0
     };
 
+    // Reduce control sensitivity when on water
+    let control_multiplier = if is_on_water { 0.5 } else { 1.0 };
+
     // Calculate base roll sensitivity based on speed
     let speed_factor = (plane_state.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
     let base_sensitivity = BASE_ROLL_SENSITIVITY * (0.5 + speed_factor * 0.5);
     
     // Calculate roll resistance based on current bank angle
-    // Maximum possible resistance
     let bank_resistance = (plane_state.bank_angle.abs() * 16.0).exp();
     let roll_direction = roll.signum();
     let current_roll_direction = plane_state.bank_angle.signum();
     
-    // Almost impossible to roll further in current direction
     let roll_sensitivity = if roll_direction == current_roll_direction {
-        base_sensitivity / (bank_resistance * bank_resistance * bank_resistance * bank_resistance) // Fourth power resistance
+        base_sensitivity / (bank_resistance * bank_resistance * bank_resistance * bank_resistance)
     } else {
-        // Very easy to roll back to level
         base_sensitivity * 16.0
     };
-
-    // Debug print to verify resistance is working
-    println!(
-        "Roll: {}, Bank: {:.2}, Resistance: {:.2}, Sensitivity: {:.6}",
-        roll,
-        plane_state.bank_angle,
-        bank_resistance,
-        roll_sensitivity
-    );
     
     // Update bank angle with resistance-adjusted sensitivity
-    plane_state.bank_angle += roll * roll_sensitivity * dt;
-    
-    // Extremely tight clamp on maximum bank angle (20 degrees)
+    plane_state.bank_angle += roll * roll_sensitivity * dt * control_multiplier;
     plane_state.bank_angle = plane_state.bank_angle.clamp(-PI / 9.0, PI / 9.0);
     
-    // Strong auto-level when no roll input
-    if roll == 0.0 {
+    // Strong auto-level when no roll input or on water
+    if roll == 0.0 || is_on_water {
         let level_factor = plane_state.bank_angle.abs() / (PI / 3.0);
-        let level_speed = AUTO_LEVEL_SPEED * (0.8 + level_factor * 0.8);
+        let level_speed = if is_on_water {
+            WATER_LEVEL_SPEED
+        } else {
+            AUTO_LEVEL_SPEED * (0.8 + level_factor * 0.8)
+        };
         plane_state.bank_angle *= 1.0 - level_speed * dt;
     }
 
     // Calculate turn rate based on bank angle
     let bank_turn = plane_state.bank_angle * BANK_TURN_RATIO;
-    
-    // Combine direct yaw input with bank-induced turn
     let total_turn = yaw * YAW_SENSITIVITY + bank_turn;
 
     // Update turn momentum
@@ -420,27 +425,46 @@ fn plane_controller(
         pitch * PITCH_SENSITIVITY,
         total_turn * TURN_SPEED,
         0.0
-    );
+    ) * control_multiplier;
+    
     plane_state.turn_momentum = plane_state.turn_momentum.lerp(target_turn, 1.0 - TURN_MOMENTUM);
 
-    // Apply rotations
-    let pitch_rotation = Quat::from_axis_angle(Vec3::X, plane_state.turn_momentum.x * dt);
-    let yaw_rotation = Quat::from_axis_angle(Vec3::Y, plane_state.turn_momentum.y * dt);
-    let roll_rotation = Quat::from_axis_angle(Vec3::Z, plane_state.bank_angle);
-
-    plane_transform.rotate(yaw_rotation);
-    plane_transform.rotate(pitch_rotation);
-    plane_transform.rotation = roll_rotation * plane_transform.rotation;
+    // Apply rotations through angular velocity
+    angular_vel.0 = Vec3::new(
+        plane_state.turn_momentum.x,
+        plane_state.turn_momentum.y,
+        plane_state.bank_angle
+    ) * 5.0;
 }
 
 fn plane_physics(
     mut plane_state: ResMut<PlaneState>,
     time: Res<Time>,
-    mut plane_query: Query<&mut Transform, With<Plane>>,
-    mut commands: Commands,
+    mut plane_query: Query<(&Transform, &CollidingEntities, &mut LinearVelocity, &mut AngularVelocity), With<Plane>>,
+    water_query: Query<Entity, With<Water>>,
 ) {
-    let mut plane_transform = plane_query.single_mut();
+    let (plane_transform, colliding_entities, mut linear_vel, mut angular_vel) = plane_query.single_mut();
     let dt = time.delta_secs();
+    let water_entity = water_query.single();
+
+    // Check if plane is touching water
+    let is_on_water = colliding_entities.contains(&water_entity);
+
+    if is_on_water {
+        // Apply stronger water resistance
+        linear_vel.0 *= WATER_DAMPING;
+        angular_vel.0 *= WATER_DAMPING;
+
+        // Gradually level the plane when on water
+        angular_vel.0.x *= WATER_ROTATION_DAMPING; // Pitch damping
+        angular_vel.0.z *= WATER_ROTATION_DAMPING; // Roll damping
+
+        // Allow taking off with enough speed
+        if plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD {
+            let up_force = Vec3::Y * plane_state.speed * TAKEOFF_FORCE;
+            linear_vel.0 += up_force * dt;
+        }
+    }
 
     // Get the plane's forward direction
     let forward = plane_transform.forward();
@@ -449,18 +473,14 @@ fn plane_physics(
     let target_momentum = forward * plane_state.speed;
     plane_state.momentum = plane_state.momentum.lerp(target_momentum, 1.0 - MOMENTUM);
 
-    // Apply momentum to position
-    plane_transform.translation += plane_state.momentum * dt;
-
-    // Keep plane above water
-    if plane_transform.translation.y < 1.0 {
-        plane_transform.translation.y = 1.0;
-    }
+    // Apply momentum to velocity
+    linear_vel.0 = plane_state.momentum;
 
     // Keep plane within bounds
     let max_distance = WATER_SIZE * 0.8;
     if plane_transform.translation.length() > max_distance {
-        plane_transform.translation = Vec3::new(0.0, 20.0, 0.0);
+        linear_vel.0 = Vec3::new(0.0, 0.0, -MIN_SPEED);
+        angular_vel.0 = Vec3::ZERO;
         plane_state.momentum = Vec3::new(0.0, 0.0, -MIN_SPEED);
         plane_state.turn_momentum = Vec3::ZERO;
         plane_state.bank_angle = 0.0;
@@ -476,38 +496,32 @@ fn camera_follow(
     let plane_transform = plane_query.single();
     let mut camera_transform = camera_query.single_mut();
     
-    // Calculate desired camera position (behind and above the plane)
     let back_dir = plane_transform.back();
     let back = Vec3::from(back_dir);
     
-    // Use a fixed offset if back vector is invalid
     let back_safe = if back.length_squared() < 0.001 {
-        Vec3::new(0.0, 0.0, 1.0) // Default to backward along Z
+        Vec3::new(0.0, 0.0, 1.0)
     } else {
         back
     };
     
-    // Calculate camera offset based on bank angle
     let bank_angle = plane_transform.rotation.to_euler(EulerRot::ZYX).2;
     let up_offset = Vec3::new(bank_angle.sin() * 5.0, 8.0, 0.0);
     let back_offset = back_safe * 25.0;
     let desired_position = plane_transform.translation + back_offset + up_offset;
     
-    // Very smooth camera movement
     let camera_smoothing = 3.0;
     let alpha = 1.0 - (-time.delta_secs() * camera_smoothing).exp();
     camera_transform.translation = camera_transform.translation.lerp(
         desired_position,
-        alpha.clamp(0.0, 0.15) // Even more limited interpolation for extra smoothness
+        alpha.clamp(0.0, 0.15)
     );
     
-    // Make camera look at the plane
     let forward_dir = plane_transform.forward();
     let forward = Vec3::from(forward_dir);
     
-    // Use a fixed forward vector if invalid
     let forward_safe = if forward.length_squared() < 0.001 {
-        Vec3::new(0.0, 0.0, -1.0) // Default to forward along Z
+        Vec3::new(0.0, 0.0, -1.0)
     } else {
         forward
     };
@@ -523,11 +537,9 @@ fn cloud_movement(
     let dt = time.delta_secs();
     
     for (mut transform, cloud) in cloud_query.iter_mut() {
-        // Move clouds slowly in the wind direction
         let wind_direction = Vec3::new(1.0, 0.0, 0.5).normalize();
         transform.translation += wind_direction * cloud.speed * dt;
         
-        // If cloud moves too far, wrap it around to the other side
         if transform.translation.x > WATER_SIZE / 2.0 {
             transform.translation.x = -WATER_SIZE / 2.0;
         }

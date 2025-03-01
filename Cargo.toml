@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 bevy = { version = "0.15.3", features = ["wayland"] }
 rand = "0.8.5"
+avian3d = { version = "0.2", features = ["3d", "f32", "parry-f32"] }
