@@ -1,6 +1,6 @@
 // Game settings
-pub const MIN_SPEED: f32 = 25.0;
-pub const MAX_SPEED: f32 = 80.0;
+pub const MIN_AIRSPEED: f32 = 25.0;
+pub const MAX_AIRSPEED: f32 = 80.0;
 pub const ACCELERATION: f32 = 10.0;
 pub const WATER_SIZE: f32 = 1500.0;
 pub const ISLAND_COUNT: usize = 18;
@@ -21,7 +21,7 @@ pub const BANK_TURN_RATIO: f32 = 0.5;
 pub const WATER_DAMPING: f32 = 0.8; // Stronger damping for more realistic water resistance
 pub const WATER_ROTATION_DAMPING: f32 = 0.6; // Stronger rotation damping in water
 pub const WATER_LEVEL_SPEED: f32 = 15.3; // Much faster auto-leveling on water
-pub const TAKEOFF_SPEED_THRESHOLD: f32 = 0.7; // Percentage of MAX_SPEED needed for takeoff
+pub const TAKEOFF_SPEED_THRESHOLD: f32 = 0.7; // Percentage of MAX_AIRSPEED needed for takeoff
 pub const TAKEOFF_FORCE: f32 = 2.0;
 pub const WATER_IMPACT_THRESHOLD: f32 = 4.0; // Lower threshold for bounce effect
 pub const WATER_BOUNCE_FACTOR: f32 = 0.4; // Stronger bounce on impact

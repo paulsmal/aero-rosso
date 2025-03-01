@@ -25,7 +25,7 @@ pub fn setup_ui(commands: &mut Commands, asset_server: &Res<AssetServer>) {
     let flight_data_text_entity = commands
         .spawn((
             Text::new("FLIGHT DATA\n\
-             Speed: 0 km/h (0%)\n\
+             Airspeed: 0 km/h (0%)\n\
              Altitude: 0.0 m\n\
              Status: ON WATER\n\
              Momentum: 0.0, 0.0, 0.0\n\
@@ -68,7 +68,7 @@ pub fn setup_ui(commands: &mut Commands, asset_server: &Res<AssetServer>) {
              Roll: 0.0°\n\
              Yaw: 0.0°\n\
              Bank Angle: 0.0°\n\
-             Throttle: 0%\n\
+             Thrust: 0%\n\
              Takeoff Ready: NO\n"),
             TextFont {
                 font: font.clone(),
@@ -107,7 +107,7 @@ pub fn setup_ui(commands: &mut Commands, asset_server: &Res<AssetServer>) {
              W/S: Pitch\n\
              A/D: Roll\n\
              Q/E: Yaw\n\
-             Up/Down: Throttle\n"),
+             Up/Down: Thrust\n"),
             TextFont {
                 font: font.clone(),
                 font_size: 20.0,
@@ -143,7 +143,7 @@ pub fn update_ui_display(
     let (pitch, yaw, roll) = plane_transform.rotation.to_euler(EulerRot::XYZ);
     
     // Check takeoff conditions
-    let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+    let has_takeoff_speed = plane_state.speed > MAX_AIRSPEED * TAKEOFF_SPEED_THRESHOLD;
     let has_positive_pitch = pitch < -0.1;
     let takeoff_ready = has_takeoff_speed && has_positive_pitch;
     
@@ -155,13 +155,13 @@ pub fn update_ui_display(
         // Update the text content directly
         flight_data_text.0 = format!(
             "FLIGHT DATA\n\
-             Speed: {:.1} km/h ({:.0}%)\n\
+             Airspeed: {:.1} km/h ({:.0}%)\n\
              Altitude: {:.1} m\n\
              Status: {}\n\
              Momentum: {:.1}, {:.1}, {:.1}\n\
              Impact Bounce: {:.1}\n",
             plane_state.speed,
-            (plane_state.speed / MAX_SPEED) * 100.0,
+            (plane_state.speed / MAX_AIRSPEED) * 100.0,
             plane_transform.translation.y,
             status_str,
             plane_state.momentum.x,
@@ -180,13 +180,13 @@ pub fn update_ui_display(
              Roll: {:.1}°\n\
              Yaw: {:.1}°\n\
              Bank Angle: {:.1}°\n\
-             Throttle: {:.0}%\n\
+             Thrust: {:.0}%\n\
              Takeoff Ready: {}\n",
             pitch.to_degrees(),
             roll.to_degrees(),
             yaw.to_degrees(),
             plane_state.bank_angle.to_degrees(),
-            (plane_state.speed / MAX_SPEED) * 100.0,
+            (plane_state.speed / MAX_AIRSPEED) * 100.0,
             if takeoff_ready { "YES" } else { "NO" }
         );
     }

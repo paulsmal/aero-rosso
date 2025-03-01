@@ -37,8 +37,8 @@ fn main() {
             brightness: 0.5,
         })
         .insert_resource(PlaneState {
-            speed: MIN_SPEED,
-            momentum: Vec3::new(0.0, 0.0, -MIN_SPEED),
+            speed: MIN_AIRSPEED,
+            momentum: Vec3::new(0.0, 0.0, -MIN_AIRSPEED),
             turn_momentum: Vec3::ZERO,
             bank_angle: 0.0,
             was_on_water: false,

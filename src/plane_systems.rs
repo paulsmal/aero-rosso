@@ -17,14 +17,14 @@ pub fn plane_controller(
     let water_entity = water_query.single();
     let is_on_water = colliding_entities.contains(&water_entity);
 
-    // Speed control (Up/Down arrows)
+    // Airspeed control (Up/Down arrows)
     if keyboard_input.pressed(KeyCode::ArrowUp) {
         plane_state.speed += ACCELERATION * dt;
-        plane_state.speed = plane_state.speed.min(MAX_SPEED);
+        plane_state.speed = plane_state.speed.min(MAX_AIRSPEED);
     }
     if keyboard_input.pressed(KeyCode::ArrowDown) {
         plane_state.speed -= ACCELERATION * dt;
-        plane_state.speed = plane_state.speed.max(MIN_SPEED);
+        plane_state.speed = plane_state.speed.max(MIN_AIRSPEED);
     }
 
     // Get control inputs
@@ -56,7 +56,7 @@ pub fn plane_controller(
     let control_multiplier = if is_on_water { 0.5 } else { 1.0 };
 
     // Calculate base roll sensitivity based on speed
-    let speed_factor = (plane_state.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+    let speed_factor = (plane_state.speed - MIN_AIRSPEED) / (MAX_AIRSPEED - MIN_AIRSPEED);
     let base_sensitivity = BASE_ROLL_SENSITIVITY * (0.5 + speed_factor * 0.5);
     
     // Calculate roll resistance based on current bank angle
@@ -208,13 +208,13 @@ pub fn plane_physics(
         // Improved takeoff mechanism
         // Check if plane has enough speed and positive pitch (elevator up)
         let (pitch, _, _) = plane_transform.rotation.to_euler(EulerRot::XYZ);
-        let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+        let has_takeoff_speed = plane_state.speed > MAX_AIRSPEED * TAKEOFF_SPEED_THRESHOLD;
         let has_positive_pitch = pitch < -0.1; // Negative pitch means nose up in this coordinate system
         
         if has_takeoff_speed && has_positive_pitch {
             // Calculate takeoff force based on speed and pitch
             let pitch_factor = (-pitch).max(0.0).min(1.0); // Convert to positive factor
-            let speed_factor = (plane_state.speed / MAX_SPEED).min(1.0);
+            let speed_factor = (plane_state.speed / MAX_AIRSPEED).min(1.0);
             
             // Combine factors for final takeoff force
             let takeoff_strength = pitch_factor * speed_factor * TAKEOFF_FORCE;
@@ -259,12 +259,12 @@ pub fn plane_physics(
     // Keep plane within bounds
     let max_distance = WATER_SIZE * 0.8;
     if plane_transform.translation.length() > max_distance {
-        linear_vel.0 = Vec3::new(0.0, 0.0, -MIN_SPEED);
+        linear_vel.0 = Vec3::new(0.0, 0.0, -MIN_AIRSPEED);
         angular_vel.0 = Vec3::ZERO;
-        plane_state.momentum = Vec3::new(0.0, 0.0, -MIN_SPEED);
+        plane_state.momentum = Vec3::new(0.0, 0.0, -MIN_AIRSPEED);
         plane_state.turn_momentum = Vec3::ZERO;
         plane_state.bank_angle = 0.0;
-        plane_state.speed = MIN_SPEED;
+        plane_state.speed = MIN_AIRSPEED;
     }
 }
 
@@ -276,14 +276,14 @@ fn print_debug_info(
     pitch: f32,
 ) {
     // Check takeoff conditions
-    let has_takeoff_speed = plane_state.speed > MAX_SPEED * TAKEOFF_SPEED_THRESHOLD;
+    let has_takeoff_speed = plane_state.speed > MAX_AIRSPEED * TAKEOFF_SPEED_THRESHOLD;
     let has_positive_pitch = pitch < -0.1;
     let takeoff_ready = has_takeoff_speed && has_positive_pitch;
     
     println!(
-        "Speed: {:.1} ({:.0}%), Altitude: {:.1}, Pitch: {:.1}°, Status: {}, Takeoff Ready: {}",
+        "Airspeed: {:.1} ({:.0}%), Altitude: {:.1}, Pitch: {:.1}°, Status: {}, Takeoff Ready: {}",
         plane_state.speed,
-        (plane_state.speed / MAX_SPEED) * 100.0,
+        (plane_state.speed / MAX_AIRSPEED) * 100.0,
         transform.translation.y,
         pitch.to_degrees(),
         if is_on_water { "ON WATER" } else { "AIRBORNE" },
